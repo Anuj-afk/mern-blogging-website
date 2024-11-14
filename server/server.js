@@ -5,12 +5,13 @@ import bcrypt from 'bcrypt';
 import { nanoid } from 'nanoid';
 import jwt from 'jsonwebtoken'
 import cors from 'cors';
-import admin from "firebase-admin"
+import admin    from "firebase-admin"
 import serviceAccount from "./mern-blogging-website-e3921-firebase-adminsdk-hyrx9-a1aabfb15f.json" assert{type: "json"}
 import {getAuth} from "firebase-admin/auth"
 import aws from "aws-sdk";
 
 import User from "./Schema/User.js"
+import Blog from "./Schema/Blog.js"
 
 const server = express();
 
@@ -33,6 +34,20 @@ const generateUploadUrl = async () => {
         Key: imageName,
         Expires: 1000, 
         ContentType: 'image/jpeg',
+    })
+}
+
+const verifyJWT = (req, res, next) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    if(!token){
+        return res.status(401).json({"error": "No token provided"})
+    }
+    jwt.verify(token, process.env.SECRET_ACCESS_KEY, (err, user) => {
+        if(err){
+            return res.status(403).json({"error": "Invalid token"})
+        }
+        req.user = user.id;
+        next();
     })
 }
 
@@ -178,6 +193,25 @@ server.post("/google-auth", async (req, res) =>{
     })
 })
 
+server.post("/search-blogs", (req, res) => {
+    let { tag, page } = req.body;
+    let findQuery = {tags: tag, draft: false};
+    let maxLimit = 5;
+    Blog.find(findQuery)
+    .populate("author", "personal_info.fullname personal_info.profile_img personal_info.username -_id")
+    .sort({"publishedAt": -1})
+    .skip((page - 1) * maxLimit)
+    .select("blog_id title des banner activity tags publishedAt -_id")
+    .limit(maxLimit)
+    .then(blogs => {
+        return res.status(200).json({blogs})
+    })
+    .catch(err => {
+        console.log(err.message);
+        return res.status(500).json({error: "Error occured while fetching latest blogs"})
+    })
+})
+
 server.get('/get-upload-url', (req, res) =>{
     generateUploadUrl().then(url => {
         return res.status(200).json({uploadUrl: url});
@@ -189,6 +223,111 @@ server.get('/get-upload-url', (req, res) =>{
     })
 })
 
+server.post('/create-blog', verifyJWT,(req, res) =>{
+
+    let authorId = req.user;
+
+
+
+    let {title, des, banner, tags, content, draft} = req.body;
+
+    if(!title.length){
+        return res.status(403).json({"error": "Title is required"})
+    }
+
+    if(!draft){
+        if(!des.length || des.length > 200){
+            return res.status(403).json({"error": "Description is required under 200 characters"})
+        }
+        if(!banner.length){
+            return res.status(403).json({"error": "Banner image is required"})
+        }
+        if(!tags.length || tags.length > 10){
+            return res.status(403).json({"error": "At least one tag is required, maximum 10"})
+        }
+        if(!content.blocks.length){
+            return res.status(403).json({"error": "Content is required"})
+        }
+    }
+
+    tags = tags.map(tag => tag.toLowerCase())
+    let blog_id = title.replace(/[^a-z-A-Z0-9]/g, " ").replace(/\s+/g, "-").trim() + nanoid();
+    let blog = new Blog({
+        title, des, banner, content, tags, author: authorId, blog_id, draft: Boolean(draft)
+    })
+    blog.save().then((b) => {
+        let incrementVal = draft ? 0 : 1;
+        User.findByIdAndUpdate(authorId, {$inc: {"account_info.total_posts": incrementVal}, $push: {"blogs": b._id}})
+        .then(user => {
+            return res.status(200).json({id: blog.blog_id})
+        })
+        .catch(err => {
+            console.log(err.message);
+            return res.status(500).json({error: "failed to update total posts number"})
+        })
+    })
+    .catch(err => {
+        console.log(err.message);
+        return res.status(500).json({error: "Error occured while creating blog"})
+    })
+})
+
+server.post('/latest-blogs', (req, res) => {
+    let {page} = req.body;
+    let maxLimit = 5;
+
+    Blog.find({draft: false}).populate("author", "personal_info.fullname personal_info.profile_img personal_info.username -_id")
+    .sort({"publishedAt": -1})
+    .select("blog_id title des banner activity tags publishedAt -_id")
+    .skip(maxLimit*(page-1))
+    .limit(maxLimit)
+    .then(blogs => {
+        return res.status(200).json({blogs})
+    })
+    .catch(err => {
+        console.log(err.message);
+        return res.status(500).json({error: "Error occured while fetching latest blogs"})
+    })
+})
+
+server.get('/trending-blogs', (req, res) => {
+    let maxLimit = 5;
+
+    Blog.find({draft: false}).populate("author", "personal_info.fullname personal_info.profile_img personal_info.username -_id")
+    .sort({"activity.total_reads": -1, "activity.total_likes": -1, "publishedAt": -1})
+    .select("blog_id title publishedAt -_id")
+    .limit(maxLimit)
+    .then(blogs => {
+        return res.status(200).json({blogs})
+    })
+    .catch(err => {
+        console.log(err.message);
+        return res.status(500).json({error: "Error occured while fetching latest blogs"})
+    })
+})
+
+server.post("/all-latest-blogs-count", (req, res) => {
+    Blog.countDocuments({draft: false})
+    .then(count => {
+        return res.status(200).json({totalDocs: count})
+    })
+    .catch(err => {
+        console.log(err.message);
+        return res.status(500).json({error: "Error occured while fetching latest blogs count"})
+    })
+})
+
+server.post("/search-blogs-count", (req, res) => {
+    let {tag} = req.body;
+    Blog.countDocuments({tags: tag, draft: false})
+    .then(count => {
+        return res.status(200).json({totalDocs: count})
+    })
+    .catch(err => {
+        console.log(err.message);
+        return res.status(500).json({error: "Error occured while fetching latest blogs count"})
+    })
+})
 let port = 3000;
 server.listen(port, () => {
     console.log(`Server is running on port ${port}`);
