@@ -26,6 +26,7 @@ const HomePage = () => {
                 page: page,
                 countRoute: "/all-latest-blogs-count"
             })
+            console.log(formattedData)
             setBlog(formattedData)
         })
         .catch(err => {
