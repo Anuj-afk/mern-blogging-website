@@ -6,7 +6,11 @@ import { nanoid } from 'nanoid';
 import jwt from 'jsonwebtoken'
 import cors from 'cors';
 import admin    from "firebase-admin"
-import serviceAccount from "./mern-blogging-website-e3921-firebase-adminsdk-hyrx9-a1aabfb15f.json" assert{type: "json"}
+
+const serviceAccount = JSON.parse(
+    readFileSync("./mern-blogging-website-e3921-firebase-adminsdk-hyrx9-a1aabfb15f.json", 'utf-8')
+);
+
 import {getAuth} from "firebase-admin/auth"
 import aws from "aws-sdk";
 
