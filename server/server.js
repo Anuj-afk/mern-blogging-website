@@ -12,6 +12,7 @@ import aws from "aws-sdk";
 
 import User from "./Schema/User.js"
 import Blog from "./Schema/Blog.js"
+import Notification from './Schema/Notification.js';
 
 const server = express();
 
@@ -26,13 +27,12 @@ const s3 = new aws.S3({
 });
 
 const generateUploadUrl = async () => {
-
     const date = new Date();
     const imageName = `${nanoid()}-${date.getTime}.jpeg`
     return await s3.getSignedUrlPromise('putObject', {
         Bucket: 'mernblogging-website',
         Key: imageName,
-        Expires: 1000, 
+        Expires: 60*60, 
         ContentType: 'image/jpeg',
     })
 }
@@ -194,10 +194,10 @@ server.post("/google-auth", async (req, res) =>{
 })
 
 server.post("/search-blogs", (req, res) => {
-    let { tag, query, page, author } = req.body;
+    let { tag, query, page, author, limit, eliminate_blog} = req.body;
     let findQuery;
     if(tag){
-        findQuery = {tags: tag, draft: false};
+        findQuery = {tags: tag, draft: false, blog_id: {$ne: eliminate_blog}};
     }
     else if(query){
         findQuery = {title: new RegExp(query, 'i'), draft: false};
@@ -205,7 +205,7 @@ server.post("/search-blogs", (req, res) => {
     else if(author){
         findQuery = {author, draft: false};
     }
-    let maxLimit = 5;
+    let maxLimit = limit || 5;
     Blog.find(findQuery)
     .populate("author", "personal_info.fullname personal_info.profile_img personal_info.username -_id")
     .sort({"publishedAt": -1})
@@ -238,7 +238,7 @@ server.post('/create-blog', verifyJWT,(req, res) =>{
 
 
 
-    let {title, des, banner, tags, content, draft} = req.body;
+    let {title, des, banner, tags, content, draft, id} = req.body;
 
     if(!title.length){
         return res.status(403).json({"error": "Title is required"})
@@ -260,25 +260,39 @@ server.post('/create-blog', verifyJWT,(req, res) =>{
     }
 
     tags = tags.map(tag => tag.toLowerCase())
-    let blog_id = title.replace(/[^a-z-A-Z0-9]/g, " ").replace(/\s+/g, "-").trim() + nanoid();
-    let blog = new Blog({
-        title, des, banner, content, tags, author: authorId, blog_id, draft: Boolean(draft)
-    })
-    blog.save().then((b) => {
-        let incrementVal = draft ? 0 : 1;
-        User.findByIdAndUpdate(authorId, {$inc: {"account_info.total_posts": incrementVal}, $push: {"blogs": b._id}})
-        .then(user => {
-            return res.status(200).json({id: blog.blog_id})
+    let blog_id = id || title.replace(/[^a-z-A-Z0-9]/g, " ").replace(/\s+/g, "-").trim() + nanoid();
+    if(id){
+
+        Blog.findOneAndUpdate({blog_id: blog_id}, {title, des, banner, content, tags, draft: draft ? draft : false})
+        .then(() => {
+            return res.status(200).json({id: blog_id})
         })
         .catch(err => {
             console.log(err.message);
-            return res.status(500).json({error: "failed to update total posts number"})
+            return res.status(500).json({error: "failed to update blog"})
         })
-    })
-    .catch(err => {
-        console.log(err.message);
-        return res.status(500).json({error: "Error occured while creating blog"})
-    })
+
+    }
+    else{
+        let blog = new Blog({
+            title, des, banner, content, tags, author: authorId, blog_id, draft: Boolean(draft)
+        })
+        blog.save().then((b) => {
+            let incrementVal = draft ? 0 : 1;
+            User.findByIdAndUpdate(authorId, {$inc: {"account_info.total_posts": incrementVal}, $push: {"blogs": b._id}})
+            .then(user => {
+                return res.status(200).json({id: blog.blog_id})
+            })
+            .catch(err => {
+                console.log(err.message);
+                return res.status(500).json({error: "failed to update total posts number"})
+            })
+        })
+        .catch(err => {
+            console.log(err.message);
+            return res.status(500).json({error: "Error occured while creating blog"})
+        })
+    }
 })
 
 server.post('/latest-blogs', (req, res) => {
@@ -373,6 +387,64 @@ server.post("/get-profile", (req, res) => {
     .catch(err => {
         console.log(err.message);
         return res.status(500).json({error: "Error occured while fetching user profile"})
+    })
+})
+
+server.post("/get-blog", (req, res) => {
+    let {blog_id, draft, mode} = req.body;
+    let incrementVal = mode != "edit" ? 1: 0;
+    Blog.findOneAndUpdate({blog_id}, {$inc: {"activity.total_reads": incrementVal}})
+    .populate("author", "personal_info.fullname personal_info.username personal_info.profile_img")
+    .select("title des content banner activity publishedAt blog_id tags")
+    .then(blog => {
+        User.findOneAndUpdate({"personal_info.username": blog.author.personal_info.username}, {$inc: {"activity.total_reads": incrementVal}})
+        .catch(err => {
+            return res.status(500).json({error:  err.message})
+        })
+        if(blog.draft && !draft){
+            return res.status(404).json({error: "You can not access draft blogs"})
+        }
+        return res.status(200).json({blog});
+    })
+    .catch(err => {
+        console.log(err.message);
+        return res.status(500).json({error: "Error occured while fetching blog"})
+    })
+
+})
+
+server.post("/like-blog", verifyJWT, (req, res) => {
+    let user_id = req.user;
+    let { _id, islikedByUser} = req.body;
+    let incrementVal = islikedByUser ? -1 : 1;
+
+    Blog.findOneAndUpdate({ _id, }, {$inc: {"activity.total_likes": incrementVal}})
+    .then(blog => {
+        if(!islikedByUser){
+            let like = new Notification({ type: "like", blog: _id, notification_for: blog.author, user: user_id})
+            like.save()
+            .then(notification => {
+                return res.status(200).json({liked_by_user: true})
+            })
+            .catch(err => {
+                console.log(err.message);
+                return res.status(500).json({error: "Failed to create notification"})
+            })
+        }
+    })
+})
+
+server.post("/isliked-by-user", verifyJWT, (req, res) => {
+    let user_id = req.user;
+    let { _id } = req.body;
+
+    Notification.exists({ user: user_id, type: "like", blog: _id})
+    .then(result => {
+        return res.status(200).json({result})
+    })
+    .catch(err => {
+        console.log(err.message);
+        return res.status(500).json({error: "Error occured while checking if liked by user"})
     })
 })
 
