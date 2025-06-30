@@ -6,6 +6,7 @@ import { nanoid } from 'nanoid';
 import jwt from 'jsonwebtoken'
 import cors from 'cors';
 import admin    from "firebase-admin"
+import { readFileSync } from 'fs';
 
 const serviceAccount = JSON.parse(
     readFileSync("./mern-blogging-website-e3921-firebase-adminsdk-hyrx9-a1aabfb15f.json", 'utf-8')
